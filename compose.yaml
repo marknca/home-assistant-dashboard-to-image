@@ -1,0 +1,8 @@
+services:
+  dashboard-png:
+    build: ./dashboard_png
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ${HA_CONFIG_DIR:?Set HA_CONFIG_DIR to your Home Assistant configuration directory}:/homeassistant
+      - ./options.json:/data/options.json:ro

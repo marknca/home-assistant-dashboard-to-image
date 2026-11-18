@@ -1,0 +1,12 @@
+{
+  "source": "/homeassistant/dashboard/dashboard.html",
+  "base_url": "http://homeassistant:8123",
+  "width": 1600,
+  "height": 1200,
+  "filename": "dashboard.png",
+  "interval_seconds": 300,
+  "render_delay_ms": 2000,
+  "timeout_seconds": 60,
+  "ready_selector": "",
+  "timezone": "America/Toronto"
+}

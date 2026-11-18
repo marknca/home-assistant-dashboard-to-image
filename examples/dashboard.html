@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard PNG example</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 100%; height: 100%; }
+  body { padding: 6vw; background: #fff; color: #111; font: 3vw system-ui, sans-serif; border: 1vw solid #111; }
+  h1 { font-size: 7vw; margin: 0 0 4vw; }
+  time { display: block; padding: 2vw; background: #ffdf00; border: .5vw solid #111; }
+</style>
+<h1>Your day, at a glance.</h1>
+<time id="clock"></time>
+<p>This image refreshes at one stable URL.</p>
+<script>
+  document.querySelector("#clock").textContent = new Date().toLocaleString();
+  document.body.dataset.ready = "true";
+</script>
+</html>
