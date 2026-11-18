@@ -156,6 +156,25 @@ Files in `www`, including this PNG, are accessible without Home Assistant login.
 
 ## Troubleshooting
 
+- **Local source file does not exist:** `source` is a path inside the app container.
+  `/homeassistant` is the mounted Home Assistant configuration folder. For example,
+  a file at `/root/homeassistant/dashboard/dashboard.html` in your terminal is
+  `/homeassistant/dashboard/dashboard.html` inside the app. A file under
+  `/root/local_apps/` is in a separate directory that this app does not mount.
+  Copy the HTML and its relative assets into the Home Assistant configuration
+  folder and set `source` to that location under `/homeassistant`. The startup log
+  and missing-file error show the configured path.
+- **Timeout waiting for ready_selector:** temporarily set `ready_selector: ""`,
+  restart, and inspect the resulting PNG to see the page's state. This diagnostic
+  capture may include loading or error content. The Focus/Schedule selector
+  `#connection-status:text-is("SYNCED")` only matches a successful data refresh;
+  `PREVIEW`, `LOADING`, `PARTIAL`, and `ERROR` do not match. Fix the underlying
+  data problem before restoring the selector. Observed HTTP 401/403 responses in
+  the log indicate authentication or permission errors in page resources/API calls.
+- **Other capture timeouts:** version 1.0.1 identifies the stage (page load, fonts,
+  images, screenshot, or browser startup/cleanup). Check that resource or step
+  before increasing `timeout_seconds`. Network and JavaScript error counts are
+  included without response bodies, URLs, or script error messages.
 - **404 image:** check the app log; no image exists until the first successful
   render. Restart Core if `www` was just created.
 - **Cannot load HA:** `homeassistant` resolves inside the Supervisor network.

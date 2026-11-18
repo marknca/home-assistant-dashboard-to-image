@@ -12,6 +12,6 @@ COPY renderer.py .
 LABEL io.hass.name="Dashboard PNG" \
       io.hass.description="Scheduled HTML dashboard rendering" \
       io.hass.type="addon" \
-      io.hass.version="1.0.0"
+      io.hass.version="1.0.1"
 
 CMD ["python3", "/app/renderer.py"]

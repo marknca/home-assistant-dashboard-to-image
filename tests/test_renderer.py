@@ -7,6 +7,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -84,6 +85,39 @@ class ConfigAndPublicationTests(unittest.TestCase):
             renderer.png_size(b"not an image")
         header = renderer.PNG_SIGNATURE + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 640, 480) + b"\x00" * 9
         self.assertEqual(renderer.png_size(header), (640, 480))
+
+    def test_local_source_distinguishes_missing_files_and_directories(self):
+        missing = self.root / "dashboard/dashboard.html"
+        with self.assertRaisesRegex(renderer.RenderError, "file does not exist") as caught:
+            renderer.local_source(str(missing), self.root)
+        self.assertIn(str(missing), str(caught.exception))
+        with self.assertRaisesRegex(renderer.RenderError, "not a regular file"):
+            renderer.local_source(str(self.root), self.root)
+        missing.parent.mkdir()
+        missing.write_text("<body>Dashboard</body>")
+        self.assertEqual(renderer.local_source(str(missing), self.root), missing)
+
+    def test_local_source_rejects_symlink_outside_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory).resolve() / "private.html"
+            outside.write_text("private")
+            link = self.root / "dashboard.html"
+            link.symlink_to(outside)
+            with self.assertRaisesRegex(renderer.RenderError, "resolves outside"):
+                renderer.local_source(str(link), self.root)
+
+    def test_diagnostics_exclude_credentials_and_teardown_failures(self):
+        progress = renderer.CaptureProgress(stage="waiting for ready_selector")
+        progress.response(SimpleNamespace(status=401, url="http://example.test/?token=secret"))
+        progress.script_failed(RuntimeError("secret"))
+        progress.recording = False
+        progress.request_failed(SimpleNamespace(failure="secret"))
+        message = str(progress.timeout(60))
+        self.assertIn("waiting for ready_selector", message)
+        self.assertIn("HTTP 401", message)
+        self.assertIn("JavaScript errors: 1", message)
+        self.assertNotIn("Failed network requests", message)
+        self.assertNotIn("secret", message)
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
@@ -195,10 +229,35 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         path = await self.render()
         previous = path.read_bytes()
         self.source.write_text("<body>Still loading</body>")
-        with self.assertRaises(Exception) as caught:
+        with self.assertRaisesRegex(renderer.RenderTimeoutError, "waiting for ready_selector"):
             await self.render(replace(self.config, timeout_seconds=5))
-        self.assertIn("Timeout", type(caught.exception).__name__)
         self.assertEqual(path.read_bytes(), previous)
+
+    async def test_readiness_timeout_reports_api_failure_without_secrets(self):
+        async def respond(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            self.source.write_text('''<body><script>
+                fetch('/api/data?token=test-secret');
+                throw new Error('test-secret');
+                </script></body>''')
+            path = renderer.write_png(self.root, "dashboard.png", b"previous")
+            config = replace(self.config, base_url=f"http://127.0.0.1:{port}", timeout_seconds=5)
+            with self.assertRaises(renderer.RenderTimeoutError) as caught:
+                await self.render(config)
+            message = str(caught.exception)
+            self.assertIn("waiting for ready_selector", message)
+            self.assertIn("HTTP 401", message)
+            self.assertIn("JavaScript errors: 1", message)
+            self.assertNotIn("test-secret", message)
+            self.assertEqual(path.read_bytes(), b"previous")
 
     async def test_url_source_and_http_error(self):
         async def respond(reader, writer):

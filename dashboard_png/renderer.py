@@ -14,7 +14,7 @@ import signal
 import struct
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote, unquote, urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,6 +29,59 @@ class ConfigError(ValueError):
 
 class RenderError(RuntimeError):
     """A failed render with a safe, actionable error message."""
+
+
+class RenderTimeoutError(RenderError):
+    """A capture deadline with the stage that exhausted it."""
+
+
+@dataclass
+class CaptureProgress:
+    """Record failure context without logging page content, URLs, or credentials."""
+
+    stage: str = "validating the source file"
+    http_errors: set[int] = field(default_factory=set)
+    failed_requests: int = 0
+    script_errors: int = 0
+    recording: bool = True
+
+    def response(self, response) -> None:
+        if self.recording and response.status >= 400:
+            self.http_errors.add(response.status)
+
+    def request_failed(self, _request) -> None:
+        if self.recording:
+            self.failed_requests += 1
+
+    def script_failed(self, _error) -> None:
+        if self.recording:
+            self.script_errors += 1
+
+    def describe(self) -> str:
+        details = [f"while {self.stage}."]
+        if self.stage == "waiting for ready_selector":
+            details.append(
+                "The selector never became visible. Temporarily set ready_selector to an "
+                "empty string to inspect the rendered page, then check the dashboard's data loading."
+            )
+        elif self.stage == "loading the page":
+            details.append("Check source access and external scripts, styles, and images.")
+        elif self.stage == "waiting for fonts":
+            details.append("Check external font downloads.")
+        elif self.stage == "waiting for images":
+            details.append("Check image URLs and downloads.")
+        if self.http_errors:
+            details.append("Observed responses: " + ", ".join(f"HTTP {code}" for code in sorted(self.http_errors)) + ".")
+        if 401 in self.http_errors or 403 in self.http_errors:
+            details.append("Check the dashboard's API authentication and permissions.")
+        if self.failed_requests:
+            details.append(f"Failed network requests: {self.failed_requests}.")
+        if self.script_errors:
+            details.append(f"JavaScript errors: {self.script_errors}.")
+        return " ".join(details)
+
+    def timeout(self, seconds: int) -> RenderTimeoutError:
+        return RenderTimeoutError(f"Render timed out after {seconds} seconds {self.describe()}")
 
 
 def http_url(value: str) -> bool:
@@ -117,6 +170,29 @@ def local_asset(source_dir: Path, request_url: str) -> Path:
     return path
 
 
+def local_source(source: str, config_dir: Path) -> Path:
+    """Check a local source before starting Chromium, with distinct path errors."""
+    path = Path(source)
+    root = config_dir.resolve()
+    try:
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root):
+            raise RenderError(f"Local source {str(path)!r} resolves outside {str(root)!r}.")
+        if not resolved.exists():
+            raise RenderError(
+                f"Local source file does not exist: {str(path)!r}. "
+                f"The Home Assistant configuration directory is mounted at {str(root)!r} "
+                "inside this app. Set source to the HTML file's path under that directory."
+            )
+        if not resolved.is_file():
+            raise RenderError(f"Local source is not a regular file: {str(path)!r}.")
+    except (OSError, RuntimeError) as error:
+        if isinstance(error, RenderError):
+            raise
+        raise RenderError(f"Cannot access local source {str(path)!r} ({type(error).__name__}).") from None
+    return resolved
+
+
 def png_size(data: bytes) -> tuple[int, int]:
     if len(data) < 33 or data[:8] != PNG_SIGNATURE or data[8:16] != b"\x00\x00\x00\rIHDR":
         raise RenderError("The browser did not return a PNG.")
@@ -151,8 +227,9 @@ def write_png(config_dir: Path, filename: str, data: bytes) -> Path:
     return destination
 
 
-async def capture_page(browser, config: Config, config_dir: Path) -> bytes:
+async def capture_page(browser, config: Config, source: Path | None, progress: CaptureProgress) -> bytes:
     """Capture in a separate task so cancellation can close the browser cleanly."""
+    progress.stage = "creating the browser context"
     context = await browser.new_context(
         viewport={"width": config.width, "height": config.height},
         device_scale_factor=1,
@@ -163,12 +240,12 @@ async def capture_page(browser, config: Config, config_dir: Path) -> bytes:
         accept_downloads=False,
     )
     page = await context.new_page()
+    page.on("response", progress.response)
+    page.on("requestfailed", progress.request_failed)
+    page.on("pageerror", progress.script_failed)
     page.set_default_timeout(config.timeout_seconds * 1000)
     target = config.source
-    if not http_url(config.source):
-        source = Path(config.source).resolve()
-        if not source.is_relative_to(config_dir.resolve()) or not source.is_file():
-            raise RenderError("Local source is missing or outside the configuration directory.")
+    if source is not None:
         origin = config.base_url.rstrip("/")
         target = origin + LOCAL_PREFIX + quote(source.name)
 
@@ -185,14 +262,19 @@ async def capture_page(browser, config: Config, config_dir: Path) -> bytes:
         # Only this browser sees the private HTML. No listening HTTP server.
         await page.route(re.compile(re.escape(origin + LOCAL_PREFIX) + ".*"), serve_asset)
 
+    progress.stage = "loading the page"
     response = await page.goto(target, wait_until="load")
     if response is not None and not response.ok:
         raise RenderError(f"The dashboard returned HTTP {response.status}.")
     if config.ready_selector:
+        progress.stage = "waiting for ready_selector"
         await page.locator(config.ready_selector).first.wait_for(state="visible")
     # WebSocket dashboards never become network-idle. Use readiness + a bounded delay.
+    progress.stage = "waiting for render_delay_ms"
     await page.wait_for_timeout(config.render_delay_ms)
+    progress.stage = "waiting for fonts"
     await page.evaluate("() => document.fonts.ready")
+    progress.stage = "waiting for images"
     await page.wait_for_function(
         "() => Array.from(document.images).every(image => image.complete)"
     )
@@ -200,41 +282,63 @@ async def capture_page(browser, config: Config, config_dir: Path) -> bytes:
         "() => Array.from(document.images).every(image => image.naturalWidth > 0)"
     ):
         raise RenderError("A dashboard image failed to load.")
+    progress.stage = "taking the PNG screenshot"
     return await page.screenshot(
         type="png", full_page=False, scale="css",
         animations="disabled", caret="hide",
     )
 
 
-async def capture(config: Config, config_dir: Path, executable_path: str | None = None) -> bytes:
+async def capture(
+    config: Config, config_dir: Path, executable_path: str | None = None,
+    progress: CaptureProgress | None = None,
+) -> bytes:
+    progress = progress or CaptureProgress()
+    source = None if http_url(config.source) else local_source(config.source, config_dir)
     # Lazy import keeps configuration and publication tests independent of Chromium.
-    from playwright.async_api import async_playwright
+    from playwright.async_api import Error as BrowserError, TimeoutError as BrowserTimeoutError, async_playwright
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(
-            headless=True, executable_path=executable_path,
-            timeout=config.timeout_seconds * 1000,
-            args=["--disable-dev-shm-usage"],
-        )
-        page_task = asyncio.create_task(capture_page(browser, config, config_dir))
-        try:
-            # Cancelling a Playwright RPC can orphan its response future.
-            # Close the browser first, allowing that RPC to settle, then collect it.
-            await asyncio.wait((page_task,))
-            return page_task.result()
-        finally:
+    try:
+        progress.stage = "starting Chromium"
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(
+                headless=True, executable_path=executable_path,
+                timeout=config.timeout_seconds * 1000,
+                args=["--disable-dev-shm-usage"],
+            )
+            page_task = asyncio.create_task(capture_page(browser, config, source, progress))
             try:
-                await asyncio.wait_for(browser.close(), timeout=5)
-            except BaseException:
-                page_task.cancel()
-                raise
+                # Let pending browser RPCs settle before collecting their errors on cancellation.
+                await asyncio.wait((page_task,))
+                data = page_task.result()
+                progress.stage = "closing Chromium"
+                return data
             finally:
-                await asyncio.gather(page_task, return_exceptions=True)
+                # Teardown-induced network failures are not causes of the render failure.
+                progress.recording = False
+                try:
+                    await asyncio.wait_for(browser.close(), timeout=5)
+                except TimeoutError:
+                    page_task.cancel()
+                    raise RenderTimeoutError("Chromium cleanup timed out after 5 seconds.") from None
+                except BaseException:
+                    page_task.cancel()
+                    raise
+                finally:
+                    await asyncio.gather(page_task, return_exceptions=True)
+    except BrowserTimeoutError:
+        raise progress.timeout(config.timeout_seconds) from None
+    except BrowserError:
+        raise RenderError(f"Browser error {progress.describe()}") from None
 
 
 async def render_once(config: Config, config_dir: Path, executable_path: str | None = None) -> Path:
-    async with asyncio.timeout(config.timeout_seconds):
-        data = await capture(config, config_dir, executable_path)
+    progress = CaptureProgress()
+    try:
+        async with asyncio.timeout(config.timeout_seconds):
+            data = await capture(config, config_dir, executable_path, progress)
+    except TimeoutError:
+        raise progress.timeout(config.timeout_seconds) from None
     if png_size(data) != (config.width, config.height):
         raise RenderError("PNG dimensions do not match the configured width and height.")
     # Short synchronous commit: cancellation cannot leave a background writer publishing later.
@@ -304,6 +408,10 @@ async def async_main(args) -> int:
         "Rendering %s × %s every %s seconds to www/%s",
         config.width, config.height, config.interval_seconds, config.filename,
     )
+    if not http_url(config.source):
+        LOG.info("Local source: %r", config.source)
+    LOG.info("Capture timeout: %s seconds; ready_selector: %s", config.timeout_seconds,
+             "enabled" if config.ready_selector else "disabled")
     await run(config, args.config_dir, stop, args.browser_executable)
     return 0
 

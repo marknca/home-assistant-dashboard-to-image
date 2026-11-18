@@ -1,5 +1,5 @@
 name: Dashboard PNG
-version: "1.0.0"
+version: "1.0.1"
 slug: dashboard_png
 description: Render an HTML dashboard to a fixed-size PNG on a schedule.
 arch:
