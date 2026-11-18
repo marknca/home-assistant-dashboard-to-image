@@ -1,0 +1,1 @@
+# home-assistant-dashboard-to-image
