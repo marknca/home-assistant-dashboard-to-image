@@ -13,10 +13,8 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 MODULE = Path(__file__).resolve().parents[1] / "dashboard_png" / "renderer.py"
-spec = importlib.util.spec_from_file_location("renderer", MODULE)
-renderer = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = renderer
-spec.loader.exec_module(renderer)
+sys.path.insert(0, str(MODULE.parent))
+import renderer
 
 
 async def read_request(reader, writer):

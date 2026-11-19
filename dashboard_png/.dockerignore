@@ -2,3 +2,8 @@
 !Dockerfile
 !requirements.txt
 !renderer.py
+!catalog.py
+!manager.py
+!app.py
+!static/
+!static/**

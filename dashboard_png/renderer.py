@@ -364,7 +364,8 @@ async def capture(
         raise RenderError(f"Browser error {progress.describe()}") from None
 
 
-async def render_once(config: Config, config_dir: Path, executable_path: str | None = None) -> Path:
+async def render_png(config: Config, config_dir: Path, executable_path: str | None = None) -> bytes:
+    """Capture and validate without publishing, so schedulers can reject stale work."""
     progress = CaptureProgress()
     try:
         async with asyncio.timeout(config.timeout_seconds):
@@ -373,6 +374,11 @@ async def render_once(config: Config, config_dir: Path, executable_path: str | N
         raise progress.timeout(config.timeout_seconds) from None
     if png_size(data) != (config.width, config.height):
         raise RenderError("PNG dimensions do not match the configured width and height.")
+    return data
+
+
+async def render_once(config: Config, config_dir: Path, executable_path: str | None = None) -> Path:
+    data = await render_png(config, config_dir, executable_path)
     # Short synchronous commit: cancellation cannot leave a background writer publishing later.
     return write_png(config_dir, config.filename, data)
 

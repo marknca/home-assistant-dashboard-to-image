@@ -1,13 +1,21 @@
 # Home Assistant Dashboard PNG
 
-A Home Assistant OS app/add-on that renders trusted HTML with Chromium into
-`www/dashboard.png`, refreshed every five minutes by default. Width, height,
-filename, source, readiness, and interval are configurable.
+A Home Assistant OS app/add-on that renders multiple HTML dashboards into PNGs.
+Use **Open Web UI → Select dashboard** to manage independent sources, dimensions,
+filenames, readiness selectors, and refresh intervals in one installation.
+Shared outputs rotate dashboards or switch at local daily/weekly times while
+clients keep requesting the same `/local/<filename>.png` URL.
 
 The defaults match the 1600 × 1200 Inky dashboard in the surrounding workspace.
 That private dashboard and its credentials are deliberately not bundled here.
 
 **[Installation and configuration](dashboard_png/DOCS.md)**
+
+**Upgrading from 1.0.x:** existing options become the **Default** dashboard on first
+start. Its image URL stays the same. After import, use **Open Web UI** for changes;
+the old app Configuration tab only provides initial values. See
+[multiple dashboards](dashboard_png/DOCS.md#multiple-dashboards) and
+[shared output schedules](dashboard_png/DOCS.md#one-url-showing-different-dashboards).
 
 ## Install from GitHub
 
@@ -61,7 +69,7 @@ See the [official repository guide](https://contributors.home-assistant.io/apps/
 ## Layout
 
 - `repository.yaml`: Home Assistant app-store repository metadata.
-- `dashboard_png/`: installable app, Dockerfile, renderer, and documentation.
+- `dashboard_png/`: installable app, capture engine, scheduler, ingress UI, and documentation.
 - `examples/`: credential-free HTML and options.
 - `tests/`: configuration, publication, scheduler, and real-browser tests.
 - `compose.yaml`: standalone deployment for Home Assistant Container.
@@ -89,6 +97,12 @@ The output is `$HA_CONFIG_DIR/www/dashboard.png`, served by HA at
 `http://YOUR_HOME_ASSISTANT:8123/local/dashboard.png`.
 Restart Core once if the `www` directory is new.
 
+Compose persists profiles in `./data/dashboards.json`. Its web UI is restricted
+to the Home Assistant ingress proxy and is not exposed by Compose. Standalone
+users can stop the container, edit that JSON file (see
+[`examples/dashboards.json`](examples/dashboards.json)), then restart. Preserve
+the `data` directory across updates. `options.json` is imported only once.
+
 ## Development
 
 Use Python 3.11 or newer (the container provides Python 3.12).
@@ -101,10 +115,24 @@ python3 -m venv .venv
 RUN_BROWSER_TESTS=1 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The ordinary suite uses the standard library. The browser suite runs offline
+The ordinary suite tests configuration, schedules, and the aiohttp API. The browser suite runs offline
 against temporary HTML and a local HTTP test server; it checks actual PNG
 dimensions, updated content at one filename, source assets, data readiness,
 failure preservation, and HTTP errors.
+It also exercises selecting/duplicating dashboards, saving settings, independent
+image dimensions, shared-file rotation, daily scheduling, and responsive UI layout.
+
+To run the management UI locally (loopback only):
+
+```sh
+.venv/bin/python dashboard_png/app.py --development \
+  --options options.json --settings ./data/dashboards.json \
+  --config-dir /absolute/path/to/homeassistant
+```
+
+Open `http://127.0.0.1:8099/index.html`. Add `--browser-executable` if using an
+installed Chrome. Production accepts only the Supervisor ingress peer and does
+not publish a host port. Saving uses revision checks to reject stale browser edits.
 
 To use an installed Chrome for browser tests, set `BROWSER_EXECUTABLE` to its
 executable. To render once for debugging:

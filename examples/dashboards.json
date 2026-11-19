@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "revision": 0,
+  "dashboards": [
+    {
+      "id": "office",
+      "name": "Office",
+      "enabled": true,
+      "publish": true,
+      "config": {
+        "source": "/homeassistant/dashboard/office.html",
+        "filename": "office.png",
+        "width": 1600,
+        "height": 1200,
+        "interval_seconds": 300
+      }
+    },
+    {
+      "id": "family",
+      "name": "Family",
+      "enabled": true,
+      "publish": true,
+      "config": {
+        "source": "/homeassistant/dashboard/family.html",
+        "filename": "family.png",
+        "width": 1600,
+        "height": 1200,
+        "interval_seconds": 300
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "id": "wall-display",
+      "name": "Wall display rotation",
+      "enabled": true,
+      "filename": "display.png",
+      "mode": "rotation",
+      "rotation": [
+        {"dashboard_id": "office", "duration_seconds": 300},
+        {"dashboard_id": "family", "duration_seconds": 600}
+      ]
+    },
+    {
+      "id": "day-display",
+      "name": "Day and evening",
+      "enabled": true,
+      "filename": "day-display.png",
+      "mode": "schedule",
+      "timezone": "America/Toronto",
+      "schedule": [
+        {"dashboard_id": "office", "at": "07:00", "days": ["mon", "tue", "wed", "thu", "fri"]},
+        {"dashboard_id": "family", "at": "18:00", "days": ["mon", "tue", "wed", "thu", "fri"]}
+      ]
+    }
+  ]
+}

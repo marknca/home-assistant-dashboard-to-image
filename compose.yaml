@@ -5,4 +5,5 @@ services:
     restart: unless-stopped
     volumes:
       - ${HA_CONFIG_DIR:?Set HA_CONFIG_DIR to your Home Assistant configuration directory}:/homeassistant
+      - ./data:/data
       - ./options.json:/data/options.json:ro

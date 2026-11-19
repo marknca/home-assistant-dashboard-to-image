@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Dashboard PNG</title>
+  <link rel="stylesheet" href="static/style.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead"><div><p class="eyebrow">HOME ASSISTANT</p><h1>Dashboard PNG</h1>
+    <p>Manage dashboards. Publish images on your schedule.</p></div><span class="version">1.1.0</span></header>
+  <main>
+    <nav aria-label="Configuration sections"><button id="dashboards-tab" class="tab active" aria-pressed="true">Dashboards</button><button id="outputs-tab" class="tab" aria-pressed="false">Shared outputs</button></nav>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section class="toolbar" aria-label="Select and manage configuration">
+      <label class="selector"><span id="select-label">Select dashboard</span><select id="selection" aria-labelledby="select-label"></select></label>
+      <div class="actions"><button id="add">Add dashboard</button><button id="duplicate">Duplicate</button><button id="delete" class="danger">Delete</button><button id="save" class="primary">Save changes</button></div>
+    </section>
+    <div class="layout"><section id="editor" class="card" aria-label="Configuration"></section>
+      <aside class="card output"><h2>Image output</h2><p id="output-description"></p><code id="output-url"></code>
+        <button id="render">Render now</button><p id="status" role="status" aria-live="polite">Loading…</p>
+        <img id="preview" alt="Latest generated dashboard image" hidden>
+        <p id="preview-empty" class="muted">The latest successful image will appear here.</p>
+      </aside></div>
+    <footer>Images are saved in Home Assistant’s www folder. Clients should revalidate or bypass their cache when polling the same URL.</footer>
+  </main>
+</body>
+</html>
