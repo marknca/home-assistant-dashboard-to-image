@@ -77,7 +77,7 @@ timezone: America/Toronto
 | Option | Meaning |
 | --- | --- |
 | `source` | An absolute local HTML path inside `/homeassistant`, or a fully qualified HTTP(S) URL. |
-| `base_url` | HTTP(S) origin used when rendering local HTML; use your HA address and port. No path, credentials, query, or fragment. Ignored for URL sources. |
+| `base_url` | Reachable HTTP(S) origin used when rendering local HTML; use your HA address and port. No path, credentials, query, or fragment. Ignored for URL sources. |
 | `width`, `height` | Exact output dimensions, 1–8192 each; at most 33,554,432 total pixels. |
 | `filename` | Stable PNG basename, such as `dashboard.png`. No directories; always written in `www`. |
 | `interval_seconds` | Start-to-start refresh interval, 10–86400 seconds. Slow renders skip missed intervals. |
@@ -91,11 +91,18 @@ up automatically on the next render. Restarting also triggers an immediate rende
 
 ## Local HTML and Home Assistant APIs
 
-Local HTML is fulfilled inside the headless browser at a synthetic path under
-`base_url`. This gives it the same origin as Home Assistant, so
-`window.location.origin` and `fetch("/api/...")` work as expected. There is no
-public HTML server. Relative assets are read from the HTML's directory; absolute
-paths such as `/local/icon.svg` are requested from `base_url`.
+The browser first connects to a private path under `base_url` to establish the real
+network origin, then replaces that page with the local UTF-8 HTML. A 404 response
+for this initial private path is expected and ignored. If Chromium rejects an empty
+error response, the app uses the origin's landing page instead. The HTML is injected only
+inside the browser; it is not uploaded or publicly hosted. This gives it the same
+origin as Home Assistant, so `window.location.origin` and `fetch("/api/...")` work
+as expected, including Chromium's Local Network Access checks. Relative assets
+are read from the HTML's directory; absolute paths such as `/local/icon.svg` are
+requested from `base_url`.
+
+Local sources require a reachable `base_url`, even if the HTML itself is static.
+If it redirects to a different origin, configure the final origin directly.
 
 Keep source HTML containing credentials in `dashboard/`, **outside `www/`**.
 Only the resulting image needs to be public. The app does not provide authentication
@@ -156,6 +163,13 @@ Files in `www`, including this PNG, are accessible without Home Assistant login.
 
 ## Troubleshooting
 
+- **HTML has data but the PNG does not:** use version 1.0.2 or later. Earlier
+  versions could trigger Chromium's local-network restrictions when loading
+  private HTML, blocking API calls. Also check that the private `source` file is
+  the same version as the HTML viewed in your browser. A browser may retain an
+  older HTML or PNG because Home Assistant serves `/local/` with cache headers;
+  force a fresh fetch. `SYNCED` only means the HTML's data-loading code reported
+  success; check its response parsing if it reports empty lists unexpectedly.
 - **Local source file does not exist:** `source` is a path inside the app container.
   `/homeassistant` is the mounted Home Assistant configuration folder. For example,
   a file at `/root/homeassistant/dashboard/dashboard.html` in your terminal is

@@ -66,6 +66,8 @@ class CaptureProgress:
             )
         elif self.stage == "loading the page":
             details.append("Check source access and external scripts, styles, and images.")
+        elif self.stage == "connecting to base_url":
+            details.append("base_url must be reachable from this app and stay on the configured origin.")
         elif self.stage == "waiting for fonts":
             details.append("Check external font downloads.")
         elif self.stage == "waiting for images":
@@ -229,6 +231,8 @@ def write_png(config_dir: Path, filename: str, data: bytes) -> Path:
 
 async def capture_page(browser, config: Config, source: Path | None, progress: CaptureProgress) -> bytes:
     """Capture in a separate task so cancellation can close the browser cleanly."""
+    from playwright.async_api import Error as BrowserError
+
     progress.stage = "creating the browser context"
     context = await browser.new_context(
         viewport={"width": config.width, "height": config.height},
@@ -240,9 +244,6 @@ async def capture_page(browser, config: Config, source: Path | None, progress: C
         accept_downloads=False,
     )
     page = await context.new_page()
-    page.on("response", progress.response)
-    page.on("requestfailed", progress.request_failed)
-    page.on("pageerror", progress.script_failed)
     page.set_default_timeout(config.timeout_seconds * 1000)
     target = config.source
     if source is not None:
@@ -259,13 +260,44 @@ async def capture_page(browser, config: Config, source: Path | None, progress: C
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             await route.fulfill(status=200, content_type=content_type, body=body)
 
-        # Only this browser sees the private HTML. No listening HTTP server.
+        # A fulfilled main-document request has no real remote IP. Chromium can then
+        # block even same-origin LAN API requests under Local Network Access checks.
+        # Establish the real origin first; a 404 at this private path is expected.
+        progress.stage = "connecting to base_url"
+        try:
+            await page.goto(target, wait_until="domcontentloaded")
+        except BrowserError as error:
+            # Chromium replaces empty HTTP error responses with an opaque error page.
+            # In that case establish the origin through its normal landing page instead.
+            if "net::ERR_HTTP_RESPONSE_CODE_FAILURE" not in str(error):
+                raise
+            # The failed navigation may still commit chrome-error://chromewebdata/.
+            # A fresh page avoids racing that commit with the fallback navigation.
+            await page.close()
+            page = await context.new_page()
+            page.set_default_timeout(config.timeout_seconds * 1000)
+            await page.goto(origin + "/", wait_until="domcontentloaded")
+        expected, actual = urlsplit(target), urlsplit(page.url)
+        def origin_key(url):
+            return (url.scheme, url.hostname, url.port or (443 if url.scheme == "https" else 80))
+        if origin_key(expected) != origin_key(actual):
+            raise RenderError("base_url redirected to a different origin. Configure its final HTTP(S) origin directly.")
+        await page.evaluate("url => history.replaceState(null, '', url)", target)
+        # Only this browser sees the private HTML and assets. Nothing is published.
         await page.route(re.compile(re.escape(origin + LOCAL_PREFIX) + ".*"), serve_asset)
 
+    # Do not report the expected bootstrap 404 as a dashboard resource failure.
+    page.on("response", progress.response)
+    page.on("requestfailed", progress.request_failed)
+    page.on("pageerror", progress.script_failed)
     progress.stage = "loading the page"
-    response = await page.goto(target, wait_until="load")
-    if response is not None and not response.ok:
-        raise RenderError(f"The dashboard returned HTTP {response.status}.")
+    if source is not None:
+        html = await asyncio.to_thread(source.read_text, encoding="utf-8-sig")
+        await page.set_content(html, wait_until="load")
+    else:
+        response = await page.goto(target, wait_until="load")
+        if response is not None and not response.ok:
+            raise RenderError(f"The dashboard returned HTTP {response.status}.")
     if config.ready_selector:
         progress.stage = "waiting for ready_selector"
         await page.locator(config.ready_selector).first.wait_for(state="visible")

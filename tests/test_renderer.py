@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import replace
 import importlib.util
 import gc
+import json
 import os
 from pathlib import Path
 import struct
@@ -16,6 +17,15 @@ spec = importlib.util.spec_from_file_location("renderer", MODULE)
 renderer = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = renderer
 spec.loader.exec_module(renderer)
+
+
+async def read_request(reader, writer):
+    """Ignore browser preconnect sockets that close without sending a request."""
+    try:
+        return await reader.readuntil(b"\r\n\r\n")
+    except (asyncio.IncompleteReadError, ConnectionError):
+        writer.close()
+        return b""
 
 
 class ConfigAndPublicationTests(unittest.TestCase):
@@ -190,8 +200,22 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.directory.name).resolve()
         self.source = self.root / "dashboard.html"
         self.executable = os.environ.get("BROWSER_EXECUTABLE")
+
+        async def bootstrap(reader, writer):
+            if not await read_request(reader, writer):
+                return
+            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot found")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_server(bootstrap, "127.0.0.1", 0)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        port = server.sockets[0].getsockname()[1]
         self.config = renderer.Config.from_mapping({
             "source": str(self.source), "width": 640, "height": 480,
+            "base_url": f"http://127.0.0.1:{port}",
             "render_delay_ms": 0, "ready_selector": 'body[data-ready="true"]',
         }, self.root)
 
@@ -213,7 +237,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
                 setTimeout(() => document.body.dataset.ready = "true", 100);
             });
             </script>
-        """)
+        """.replace('"http://homeassistant:8123"', json.dumps(self.config.base_url)))
         path = await self.render()
         first = path.read_bytes()
         self.assertEqual(renderer.png_size(first), (640, 480))
@@ -235,8 +259,9 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_readiness_timeout_reports_api_failure_without_secrets(self):
         async def respond(reader, writer):
-            await reader.readuntil(b"\r\n\r\n")
-            writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            if not await read_request(reader, writer):
+                return
+            writer.write(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 12\r\nConnection: close\r\n\r\nUnauthorized")
             await writer.drain()
             writer.close()
             await writer.wait_closed()
@@ -261,8 +286,9 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_url_source_and_http_error(self):
         async def respond(reader, writer):
-            first = await reader.readline()
-            await reader.readuntil(b"\r\n\r\n")
+            first = await read_request(reader, writer)
+            if not first:
+                return
             if b"/bad " in first:
                 status, body = b"503 Service Unavailable", b"Unavailable"
             else:
@@ -291,6 +317,100 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(renderer.RenderError, "image failed"):
             await self.render()
         self.assertEqual(path.read_bytes(), previous)
+
+    async def test_local_html_can_fetch_api_on_lan_hostname(self):
+        from playwright.async_api import async_playwright
+
+        async def respond(reader, writer):
+            request = await read_request(reader, writer)
+            if not request:
+                return
+            if request.startswith(b"GET /api/items "):
+                status, body = b"200 OK", b'{"count": 8}'
+            else:
+                status, body = b"404 Not Found", b"{}"
+            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: application/json\r\nContent-Length: "
+                         + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        self.source.write_text('''<body><script>
+            fetch('/api/items').then(r => r.json()).then(data => {
+                document.body.textContent = String(data.count);
+                if (data.count === 8) document.body.dataset.ready = 'true';
+            });
+            </script></body>''')
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        async with server, async_playwright() as playwright:
+            port = server.sockets[0].getsockname()[1]
+            config = replace(self.config, base_url=f"http://dashboard.test:{port}", timeout_seconds=5)
+            browser = await playwright.chromium.launch(
+                headless=True, executable_path=self.executable,
+                # A LAN-style HTTP hostname is not treated as a localhost secure context.
+                args=["--host-resolver-rules=MAP dashboard.test 127.0.0.1", "--no-proxy-server"],
+            )
+            try:
+                progress = renderer.CaptureProgress()
+                data = await renderer.capture_page(browser, config, self.source, progress)
+                self.assertEqual(renderer.png_size(data), (640, 480))
+                page = browser.contexts[0].pages[0]
+                self.assertEqual(await page.locator("body").inner_text(), "8")
+                self.assertEqual(progress.failed_requests, 0)
+                self.assertEqual(progress.http_errors, set(), "Bootstrap 404 must not count as a dashboard error")
+            finally:
+                await browser.close()
+
+    async def test_local_source_rejects_cross_origin_redirect(self):
+        async def respond(reader, writer):
+            request = await read_request(reader, writer)
+            if not request:
+                return
+            if request.startswith(b"GET /landing "):
+                response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            else:
+                response = (f"HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/landing\r\n"
+                            "Content-Length: 0\r\nConnection: close\r\n\r\n").encode()
+            writer.write(response)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        self.source.write_text('<body data-ready="true">Private dashboard</body>')
+        path = renderer.write_png(self.root, "dashboard.png", b"previous")
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            config = replace(self.config, base_url=f"http://127.0.0.1:{port}")
+            with self.assertRaisesRegex(renderer.RenderError, "different origin"):
+                await self.render(config)
+            self.assertEqual(path.read_bytes(), b"previous")
+
+    async def test_empty_bootstrap_error_uses_origin_root(self):
+        requested = []
+        async def respond(reader, writer):
+            request = await read_request(reader, writer)
+            if not request:
+                return
+            path = request.split(b" ")[1]
+            requested.append(path)
+            if path == b"/":
+                status, body = b"200 OK", b"<body>Origin landing page</body>"
+            else:
+                status, body = b"404 Not Found", b""
+            writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Type: text/html\r\nContent-Length: "
+                         + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        self.source.write_text('<body data-ready="true">Private dashboard</body>')
+        server = await asyncio.start_server(respond, "127.0.0.1", 0)
+        async with server:
+            port = server.sockets[0].getsockname()[1]
+            path = await self.render(replace(self.config, base_url=f"http://127.0.0.1:{port}"))
+            self.assertEqual(renderer.png_size(path.read_bytes()), (640, 480))
+            self.assertIn(b"/", requested)
 
 
 if __name__ == "__main__":

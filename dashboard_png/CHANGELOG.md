@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.2
+
+- Fix Chromium blocking Home Assistant API requests from privately rendered local HTML: establish the real base URL origin before injecting the HTML.
+- Keep private HTML and assets inside the browser, preserve relative asset paths, and reject redirects to another origin.
+- Add a browser regression test for same-origin API access through a LAN-style hostname.
+
 ## 1.0.1
 
 - Identify the exact capture stage on timeout, including readiness, fonts, and images.
